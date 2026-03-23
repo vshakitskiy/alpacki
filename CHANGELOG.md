@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v2.0.0 - 23.03.2026
 
 - Remove header field validation
 - Add `expect_table_size_update` for decoder-side size update enforcement

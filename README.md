@@ -7,7 +7,7 @@ alpacki is an HPACK ([RFC 7541](https://datatracker.ietf.org/doc/html/rfc7541))
 implementation for Gleam. It handles header compression for HTTP/2 connections.
 
 ```sh
-gleam add alpacki@1
+gleam add alpacki@2
 ```
 
 # Encoding and decoding
@@ -56,8 +56,7 @@ let #(data, encoder_table) =
   alpacki.encode_header_block(headers, encoder_table, huffman: True)
 ```
 
-On the decoder side, nothing special is needed, as `decode_header_block`
-processes any size update instructions at the start of a block automatically.
+On the decoder side, `expect_table_size_update` can optionally be used to enforce the peer sends the size update, `decode_header_block` processes any size update instructions at the start of a block automatically.
 
 # Primitives
 
