@@ -325,17 +325,21 @@ fn maximum_value_for_bits(n: Int) -> Int {
 pub fn decode_string_literal(
   data: BitArray,
 ) -> Result(#(BitArray, BitArray), DecodeError) {
-  use #(length, remaining) <- result.try(decode_integer(data, 7))
-
-  case remaining, data {
-    <<encoded:bytes-size(length), remaining:bits>>, <<1:1, _remaining:bits>> -> {
-      use string_literal <- result.try(decode_huffman(encoded))
-      Ok(#(string_literal, remaining))
-    }
-    <<string_literal:bytes-size(length), remaining:bits>>,
-      <<0:1, _remaining:bits>>
-    -> Ok(#(string_literal, remaining))
-    _, _ -> Error(Incomplete)
+  case decode_integer(data, 7) {
+    Error(error) -> Error(error)
+    Ok(#(length, remaining)) ->
+      case remaining, data {
+        <<encoded:bytes-size(length), remaining:bits>>, <<1:1, _remaining:bits>>
+        ->
+          case decode_huffman(encoded) {
+            Error(error) -> Error(error)
+            Ok(string_literal) -> Ok(#(string_literal, remaining))
+          }
+        <<string_literal:bytes-size(length), remaining:bits>>,
+          <<0:1, _remaining:bits>>
+        -> Ok(#(string_literal, remaining))
+        _, _ -> Error(Incomplete)
+      }
   }
 }
 
@@ -989,11 +993,11 @@ pub type HeaderField {
 /// Result of decoding a header block fragment.
 ///
 /// `remaining` holds any unconsumed trailing bytes. It is non-empty when the
-/// fragment ends mid field, the header fields decoded so far are returned
+/// fragment ends mid-field: the header fields decoded so far are returned
 /// along with the updated table, and the caller is expected to prepend more
-/// data to `remaining` and decode again. `remaining` is empty when the whole 
+/// data to `remaining` and decode again. `remaining` is empty when the whole
 /// fragment was consumed.
-/// 
+///
 /// `decoded_size` is the sum of RFC 7541 Section 4.1 entry sizes (name +
 /// value + 32) for the headers decoded in this call, useful for enforcing a
 /// maximum header list size across calls.
@@ -1041,25 +1045,21 @@ pub type DecodedHeaderBlock {
 ///
 /// Indexed representations reference an existing table entry. Literal
 /// representations carry the value on the wire, optionally referencing a
-/// table entry for the name. The decoder preserves each header field's
-/// indexing mode in the returned `HeaderField`.
+/// table entry for the name. Header names and values are returned as opaque.
 pub fn decode_header_block(
   data: BitArray,
   dynamic_table: DynamicTable,
 ) -> Result(DecodedHeaderBlock, DecodeError) {
-  use #(data, table, truncated) <- result.try(decode_size_updates(
-    data,
-    dynamic_table,
-  ))
-  case truncated {
-    True ->
+  case decode_size_updates(data, dynamic_table) {
+    Error(error) -> Error(error)
+    Ok(#(data, table, True)) ->
       Ok(DecodedHeaderBlock(
         headers: [],
         decoded_size: 0,
         dynamic_table: table,
         remaining: data,
       ))
-    False -> decode_header_fields(data, table, [], 0)
+    Ok(#(data, table, False)) -> decode_header_fields(data, table, [], 0)
   }
 }
 
@@ -1119,18 +1119,19 @@ fn decode_header_fields(
       case decode_integer(data, 7) {
         Error(Incomplete) -> Ok(stop(acc, decoded_size, table, data))
         Error(error) -> Error(error)
-        Ok(#(index, remaining)) -> {
-          use #(name, value) <- result.try(
-            lookup(table, index) |> result.replace_error(InvalidTableIndex),
-          )
-          let entry_size = calculate_entry_size(name, value)
-          decode_header_fields(
-            remaining,
-            table,
-            [#(name, value), ..acc],
-            decoded_size + entry_size,
-          )
-        }
+        Ok(#(index, remaining)) ->
+          case lookup(table, index) {
+            Error(Nil) -> Error(InvalidTableIndex)
+            Ok(#(name, value)) -> {
+              let entry_size = calculate_entry_size(name, value)
+              decode_header_fields(
+                remaining,
+                table,
+                [#(name, value), ..acc],
+                decoded_size + entry_size,
+              )
+            }
+          }
       }
 
     // 6.2.1 Literal Header Field with Incremental Indexing
@@ -1219,31 +1220,34 @@ fn decode_literal(
   table: DynamicTable,
   prefix: Int,
 ) -> Result(#(BitArray, BitArray, BitArray), DecodeError) {
-  use #(index, remaining) <- result.try(decode_integer(data, prefix))
-
-  use #(name, remaining) <- result.try(case index {
-    // That is a new string literal.
-    0 -> {
-      use #(name, remaining) <- result.try(decode_string_literal(remaining))
-      Ok(#(name, remaining))
+  case decode_integer(data, prefix) {
+    Error(error) -> Error(error)
+    Ok(#(index, remaining)) -> {
+      let name_result = case index {
+        // That is a new string literal.
+        0 -> decode_string_literal(remaining)
+        // That is a name from the table.
+        _ ->
+          case lookup(table, index) {
+            Error(Nil) -> Error(InvalidTableIndex)
+            Ok(#(name, _value)) -> Ok(#(name, remaining))
+          }
+      }
+      case name_result {
+        Error(error) -> Error(error)
+        Ok(#(name, remaining)) ->
+          case decode_string_literal(remaining) {
+            Error(error) -> Error(error)
+            Ok(#(value, remaining)) -> Ok(#(name, value, remaining))
+          }
+      }
     }
-    // That is a name from the table.
-    _ -> {
-      use #(name, _value) <- result.try(
-        lookup(table, index) |> result.replace_error(InvalidTableIndex),
-      )
-      Ok(#(name, remaining))
-    }
-  })
-
-  use #(value, remaining) <- result.try(decode_string_literal(remaining))
-
-  Ok(#(name, value, remaining))
+  }
 }
 
 /// Encodes a list of header fields into a header block fragment, updating the
 /// dynamic table as entries are added. Returns the encoded block as a
-/// `BytesTree` and the updated dynamic table. When `huffman` is `True`, all
+/// `BitArray` and the updated dynamic table. When `huffman` is `True`, all
 /// name and value strings use Huffman coding.
 ///
 /// If `resize_dynamic` was called since the last encoding, the required

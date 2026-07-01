@@ -8,19 +8,36 @@ import glychee/configuration
 pub type HpaxTable
 
 @external(erlang, "hpax_ffi", "new")
-pub fn new(max_size: Int) -> HpaxTable
+pub fn hpax_new(max_size: Int) -> HpaxTable
 
 @external(erlang, "hpax_ffi", "resize")
-pub fn resize(table: HpaxTable, new_size: Int) -> HpaxTable
+pub fn hpax_resize(table: HpaxTable, new_size: Int) -> HpaxTable
 
 @external(erlang, "hpax_ffi", "decode")
-pub fn decode(data: BitArray, table: HpaxTable) -> dynamic.Dynamic
+pub fn hpax_decode(data: BitArray, table: HpaxTable) -> dynamic.Dynamic
 
 @external(erlang, "hpax_ffi", "encode_store")
-pub fn encode_store(
+pub fn hpax_encode_store(
   headers: List(#(BitArray, BitArray)),
   table: HpaxTable,
 ) -> #(BitArray, HpaxTable)
+
+pub type HpackErlTable
+
+@external(erlang, "hpack_erl_ffi", "new")
+pub fn hpack_erl_new(max_size: Int) -> HpackErlTable
+
+@external(erlang, "hpack_erl_ffi", "resize")
+pub fn hpack_erl_resize(table: HpackErlTable, new_size: Int) -> HpackErlTable
+
+@external(erlang, "hpack_erl_ffi", "decode")
+pub fn hpack_erl_decode(data: BitArray, table: HpackErlTable) -> dynamic.Dynamic
+
+@external(erlang, "hpack_erl_ffi", "encode")
+pub fn hpack_erl_encode(
+  headers: List(#(BitArray, BitArray)),
+  table: HpackErlTable,
+) -> #(BitArray, HpackErlTable)
 
 pub fn main() {
   configuration.initialize()
@@ -84,7 +101,13 @@ fn run_encode_benchmark() {
       }),
       benchmark.Function(label: "hpax", callable: fn(headers) {
         fn() {
-          let _ = encode_store(headers, new(table_size))
+          let _ = hpax_encode_store(headers, hpax_new(table_size))
+          Nil
+        }
+      }),
+      benchmark.Function(label: "hpack_erl", callable: fn(headers) {
+        fn() {
+          let _ = hpack_erl_encode(headers, hpack_erl_new(table_size))
           Nil
         }
       }),
@@ -112,13 +135,19 @@ fn run_decode_benchmark() {
       alpacki.new_dynamic(table_size),
       False,
     )
-  let #(hpax_small, _) = encode_store(small_headers(), new(table_size))
-  let #(hpax_large, _) = encode_store(large_headers(), new(table_size))
+  let #(hpax_small, _) =
+    hpax_encode_store(small_headers(), hpax_new(table_size))
+  let #(hpax_large, _) =
+    hpax_encode_store(large_headers(), hpax_new(table_size))
+  let #(hpack_erl_small, _) =
+    hpack_erl_encode(small_headers(), hpack_erl_new(table_size))
+  let #(hpack_erl_large, _) =
+    hpack_erl_encode(large_headers(), hpack_erl_new(table_size))
 
   benchmark.run(
     [
       benchmark.Function(label: "alpacki", callable: fn(data) {
-        let #(alpacki_bytes, _hpax_bytes) = data
+        let #(alpacki_bytes, _hpax_bytes, _hpack_erl_bytes) = data
         fn() {
           let _ =
             alpacki.decode_header_block(
@@ -129,9 +158,16 @@ fn run_decode_benchmark() {
         }
       }),
       benchmark.Function(label: "hpax", callable: fn(data) {
-        let #(_alpacki_bytes, hpax_bytes) = data
+        let #(_alpacki_bytes, hpax_bytes, _hpack_erl_bytes) = data
         fn() {
-          let _ = decode(hpax_bytes, new(table_size))
+          let _ = hpax_decode(hpax_bytes, hpax_new(table_size))
+          Nil
+        }
+      }),
+      benchmark.Function(label: "hpack_erl", callable: fn(data) {
+        let #(_alpacki_bytes, _hpax_bytes, hpack_erl_bytes) = data
+        fn() {
+          let _ = hpack_erl_decode(hpack_erl_bytes, hpack_erl_new(table_size))
           Nil
         }
       }),
@@ -140,10 +176,12 @@ fn run_decode_benchmark() {
       benchmark.Data(label: "decode: small (6 headers)", data: #(
         alpacki_small,
         hpax_small,
+        hpack_erl_small,
       )),
       benchmark.Data(label: "decode: large (46 headers)", data: #(
         alpacki_large,
         hpax_large,
+        hpack_erl_large,
       )),
     ],
   )
@@ -159,7 +197,10 @@ fn run_resize_benchmark() {
       alpacki.new_dynamic(table_size),
       False,
     )
-  let #(_, hpax_table) = encode_store(large_headers(), new(table_size))
+  let #(_, hpax_table) =
+    hpax_encode_store(large_headers(), hpax_new(table_size))
+  let #(_, hpack_erl_table) =
+    hpack_erl_encode(large_headers(), hpack_erl_new(table_size))
 
   benchmark.run(
     [
@@ -174,8 +215,16 @@ fn run_resize_benchmark() {
       benchmark.Function(label: "hpax", callable: fn(_table) {
         fn() {
           let _ =
-            resize(hpax_table, 0)
-            |> resize(table_size)
+            hpax_resize(hpax_table, 0)
+            |> hpax_resize(table_size)
+          Nil
+        }
+      }),
+      benchmark.Function(label: "hpack_erl", callable: fn(_table) {
+        fn() {
+          let _ =
+            hpack_erl_resize(hpack_erl_table, 0)
+            |> hpack_erl_resize(table_size)
           Nil
         }
       }),

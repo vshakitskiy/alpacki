@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.0.0 - 02.07.2026
+
+- Introduce `DecodedHeaderBlock` as a success return value for decoding header 
+block
+- Fill micro code optimizations 
+- Benchmark and profile to summarize difference between hpack solutions
+
 ## v2.0.0 - 23.03.2026
 
 - Remove header field validation
