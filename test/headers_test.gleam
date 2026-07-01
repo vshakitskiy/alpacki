@@ -8,67 +8,40 @@ import alpacki
 
 pub fn decode_literal_with_indexing_new_name_test() {
   let table = alpacki.new_dynamic(4096)
-  let assert Ok(#(headers, table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(
       <<0x40, 0x0a, "custom-key":utf8, 0x0d, "custom-header":utf8>>,
       table,
     )
-  assert headers
-    == [
-      alpacki.HeaderField(
-        <<"custom-key":utf8>>,
-        <<"custom-header":utf8>>,
-        alpacki.WithIndexing,
-      ),
-    ]
-  assert alpacki.dynamic_length(table) == 1
-  assert alpacki.dynamic_size(table) == 55
+  assert decoded.headers == [#(<<"custom-key":utf8>>, <<"custom-header":utf8>>)]
+  assert decoded.remaining == <<>>
+  assert alpacki.dynamic_length(decoded.dynamic_table) == 1
+  assert alpacki.dynamic_size(decoded.dynamic_table) == 55
+  assert decoded.decoded_size == 55
 }
 
 pub fn decode_literal_without_indexing_indexed_name_test() {
   let table = alpacki.new_dynamic(4096)
-  let assert Ok(#(headers, table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(<<0x04, 0x0c, "/sample/path":utf8>>, table)
-  assert headers
-    == [
-      alpacki.HeaderField(
-        <<":path":utf8>>,
-        <<"/sample/path":utf8>>,
-        alpacki.WithoutIndexing,
-      ),
-    ]
-  assert alpacki.dynamic_length(table) == 0
+  assert decoded.headers == [#(<<":path":utf8>>, <<"/sample/path":utf8>>)]
+  assert alpacki.dynamic_length(decoded.dynamic_table) == 0
 }
 
 pub fn decode_literal_never_indexed_new_name_test() {
   let table = alpacki.new_dynamic(4096)
-  let assert Ok(#(headers, _table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(
       <<0x10, 0x08, "password":utf8, 0x06, "secret":utf8>>,
       table,
     )
-  assert headers
-    == [
-      alpacki.HeaderField(
-        <<"password":utf8>>,
-        <<"secret":utf8>>,
-        alpacki.NeverIndexed,
-      ),
-    ]
+  assert decoded.headers == [#(<<"password":utf8>>, <<"secret":utf8>>)]
 }
 
 pub fn decode_indexed_test() {
   let table = alpacki.new_dynamic(4096)
-  let assert Ok(#(headers, _table)) =
-    alpacki.decode_header_block(<<0x82>>, table)
-  assert headers
-    == [
-      alpacki.HeaderField(
-        <<":method":utf8>>,
-        <<"GET":utf8>>,
-        alpacki.WithIndexing,
-      ),
-    ]
+  let assert Ok(decoded) = alpacki.decode_header_block(<<0x82>>, table)
+  assert decoded.headers == [#(<<":method":utf8>>, <<"GET":utf8>>)]
 }
 
 // Sequential Requests (RFC 7541 C.3)
@@ -77,105 +50,57 @@ pub fn decode_indexed_test() {
 pub fn decode_c3_sequential_requests_test() {
   let table = alpacki.new_dynamic(4096)
 
-  let assert Ok(#(headers, table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(
       <<0x82, 0x86, 0x84, 0x41, 0x0f, "www.example.com":utf8>>,
       table,
     )
-  assert headers
+  assert decoded.headers
     == [
-      alpacki.HeaderField(
-        <<":method":utf8>>,
-        <<"GET":utf8>>,
-        alpacki.WithIndexing,
-      ),
-      alpacki.HeaderField(
-        <<":scheme":utf8>>,
-        <<"http":utf8>>,
-        alpacki.WithIndexing,
-      ),
-      alpacki.HeaderField(<<":path":utf8>>, <<"/":utf8>>, alpacki.WithIndexing),
-      alpacki.HeaderField(
-        <<":authority":utf8>>,
-        <<"www.example.com":utf8>>,
-        alpacki.WithIndexing,
-      ),
+      #(<<":method":utf8>>, <<"GET":utf8>>),
+      #(<<":scheme":utf8>>, <<"http":utf8>>),
+      #(<<":path":utf8>>, <<"/":utf8>>),
+      #(<<":authority":utf8>>, <<"www.example.com":utf8>>),
     ]
-  assert alpacki.dynamic_length(table) == 1
-  assert alpacki.dynamic_size(table) == 57
+  assert alpacki.dynamic_length(decoded.dynamic_table) == 1
+  assert alpacki.dynamic_size(decoded.dynamic_table) == 57
 
   // :authority reused from dynamic table
-  let assert Ok(#(headers, table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(
       <<0x82, 0x86, 0x84, 0xbe, 0x58, 0x08, "no-cache":utf8>>,
-      table,
+      decoded.dynamic_table,
     )
-  assert headers
+  assert decoded.headers
     == [
-      alpacki.HeaderField(
-        <<":method":utf8>>,
-        <<"GET":utf8>>,
-        alpacki.WithIndexing,
-      ),
-      alpacki.HeaderField(
-        <<":scheme":utf8>>,
-        <<"http":utf8>>,
-        alpacki.WithIndexing,
-      ),
-      alpacki.HeaderField(<<":path":utf8>>, <<"/":utf8>>, alpacki.WithIndexing),
-      alpacki.HeaderField(
-        <<":authority":utf8>>,
-        <<"www.example.com":utf8>>,
-        alpacki.WithIndexing,
-      ),
-      alpacki.HeaderField(
-        <<"cache-control":utf8>>,
-        <<"no-cache":utf8>>,
-        alpacki.WithIndexing,
-      ),
+      #(<<":method":utf8>>, <<"GET":utf8>>),
+      #(<<":scheme":utf8>>, <<"http":utf8>>),
+      #(<<":path":utf8>>, <<"/":utf8>>),
+      #(<<":authority":utf8>>, <<"www.example.com":utf8>>),
+      #(<<"cache-control":utf8>>, <<"no-cache":utf8>>),
     ]
-  assert alpacki.dynamic_length(table) == 2
-  assert alpacki.dynamic_size(table) == 110
+  assert alpacki.dynamic_length(decoded.dynamic_table) == 2
+  assert alpacki.dynamic_size(decoded.dynamic_table) == 110
 
   // :authority shifted to index 63 after cache-control added
-  let assert Ok(#(headers, table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(
       <<
         0x82, 0x87, 0x85, 0xbf, 0x40, 0x0a, "custom-key":utf8, 0x0c,
         "custom-value":utf8,
       >>,
-      table,
+      decoded.dynamic_table,
     )
-  assert headers
+  assert decoded.headers
     == [
-      alpacki.HeaderField(
-        <<":method":utf8>>,
-        <<"GET":utf8>>,
-        alpacki.WithIndexing,
-      ),
-      alpacki.HeaderField(
-        <<":scheme":utf8>>,
-        <<"https":utf8>>,
-        alpacki.WithIndexing,
-      ),
-      alpacki.HeaderField(
-        <<":path":utf8>>,
-        <<"/index.html":utf8>>,
-        alpacki.WithIndexing,
-      ),
-      alpacki.HeaderField(
-        <<":authority":utf8>>,
-        <<"www.example.com":utf8>>,
-        alpacki.WithIndexing,
-      ),
-      alpacki.HeaderField(
-        <<"custom-key":utf8>>,
-        <<"custom-value":utf8>>,
-        alpacki.WithIndexing,
-      ),
+      #(<<":method":utf8>>, <<"GET":utf8>>),
+      #(<<":scheme":utf8>>, <<"https":utf8>>),
+      #(<<":path":utf8>>, <<"/index.html":utf8>>),
+      #(<<":authority":utf8>>, <<"www.example.com":utf8>>),
+      #(<<"custom-key":utf8>>, <<"custom-value":utf8>>),
     ]
-  assert alpacki.dynamic_length(table) == 3
-  assert alpacki.dynamic_size(table) == 164
+  assert alpacki.dynamic_length(decoded.dynamic_table) == 3
+  assert alpacki.dynamic_size(decoded.dynamic_table) == 164
 }
 
 // Huffman
@@ -183,7 +108,7 @@ pub fn decode_c3_sequential_requests_test() {
 
 pub fn decode_huffman_encoded_value_test() {
   let table = alpacki.new_dynamic(4096)
-  let assert Ok(#(headers, _table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(
       <<
         0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
@@ -191,14 +116,8 @@ pub fn decode_huffman_encoded_value_test() {
       >>,
       table,
     )
-  assert headers
-    == [
-      alpacki.HeaderField(
-        <<":authority":utf8>>,
-        <<"www.example.com":utf8>>,
-        alpacki.WithIndexing,
-      ),
-    ]
+  assert decoded.headers
+    == [#(<<":authority":utf8>>, <<"www.example.com":utf8>>)]
 }
 
 // Size Update
@@ -206,28 +125,21 @@ pub fn decode_huffman_encoded_value_test() {
 
 pub fn decode_size_update_before_headers_test() {
   let table = alpacki.new_dynamic(4096)
-  let assert Ok(#(headers, table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(<<0x3f, 0x61, 0x82>>, table)
-  assert headers
-    == [
-      alpacki.HeaderField(
-        <<":method":utf8>>,
-        <<"GET":utf8>>,
-        alpacki.WithIndexing,
-      ),
-    ]
-  assert alpacki.dynamic_max_size(table) == 128
+  assert decoded.headers == [#(<<":method":utf8>>, <<"GET":utf8>>)]
+  assert alpacki.dynamic_max_size(decoded.dynamic_table) == 128
 }
 
 pub fn decode_size_update_to_zero_clears_table_test() {
   let table = alpacki.new_dynamic(4096)
-  let assert Ok(#(_headers, table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(<<0x41, 0x03, "ewe":utf8>>, table)
-  assert alpacki.dynamic_length(table) == 1
-  let assert Ok(#(_headers, table)) =
-    alpacki.decode_header_block(<<0x20, 0x82>>, table)
-  assert alpacki.dynamic_length(table) == 0
-  assert alpacki.dynamic_max_size(table) == 0
+  assert alpacki.dynamic_length(decoded.dynamic_table) == 1
+  let assert Ok(decoded) =
+    alpacki.decode_header_block(<<0x20, 0x82>>, decoded.dynamic_table)
+  assert alpacki.dynamic_length(decoded.dynamic_table) == 0
+  assert alpacki.dynamic_max_size(decoded.dynamic_table) == 0
 }
 
 pub fn decode_consecutive_size_updates_test() {
@@ -237,35 +149,21 @@ pub fn decode_consecutive_size_updates_test() {
   assert alpacki.dynamic_length(table) == 1
   // Two size updates (0 then 128) followed by indexed :method GET.
   // These are the same bytes encode_pending_double_resize_test produces.
-  let assert Ok(#(headers, table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(<<0x20, 0x3f, 0x61, 0x82>>, table)
-  assert headers
-    == [
-      alpacki.HeaderField(
-        <<":method":utf8>>,
-        <<"GET":utf8>>,
-        alpacki.WithIndexing,
-      ),
-    ]
-  assert alpacki.dynamic_length(table) == 0
-  assert alpacki.dynamic_max_size(table) == 128
+  assert decoded.headers == [#(<<":method":utf8>>, <<"GET":utf8>>)]
+  assert alpacki.dynamic_length(decoded.dynamic_table) == 0
+  assert alpacki.dynamic_max_size(decoded.dynamic_table) == 128
 }
 
 pub fn decode_expected_size_update_present_test() {
   let table =
     alpacki.new_dynamic(4096)
     |> alpacki.expect_table_size_update
-  let assert Ok(#(headers, table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(<<0x3f, 0x61, 0x82>>, table)
-  assert headers
-    == [
-      alpacki.HeaderField(
-        <<":method":utf8>>,
-        <<"GET":utf8>>,
-        alpacki.WithIndexing,
-      ),
-    ]
-  assert alpacki.dynamic_max_size(table) == 128
+  assert decoded.headers == [#(<<":method":utf8>>, <<"GET":utf8>>)]
+  assert alpacki.dynamic_max_size(decoded.dynamic_table) == 128
 }
 
 // Errors
@@ -273,7 +171,8 @@ pub fn decode_expected_size_update_present_test() {
 
 pub fn decode_empty_block_test() {
   let table = alpacki.new_dynamic(4096)
-  let assert Ok(#([], _table)) = alpacki.decode_header_block(<<>>, table)
+  let assert Ok(decoded) = alpacki.decode_header_block(<<>>, table)
+  assert decoded.headers == []
 }
 
 pub fn decode_invalid_index_test() {
@@ -282,10 +181,37 @@ pub fn decode_invalid_index_test() {
     == Error(alpacki.InvalidTableIndex)
 }
 
+// A header block fragment that ends mid-field stops decoding and returns the
+// unconsumed bytes instead of erroring, supporting CONTINUATION reassembly.
 pub fn decode_truncated_data_test() {
   let table = alpacki.new_dynamic(4096)
-  assert alpacki.decode_header_block(<<0x40, 0x0a, "abc":utf8>>, table)
-    == Error(alpacki.Incomplete)
+  // Name "custom-key" (10 bytes) is complete; the 13-byte value declares
+  // "custom-header" but only its first 5 bytes ("custo") have arrived.
+  let truncated = <<0x40, 0x0a, "custom-key":utf8, 0x0d, "custo":utf8>>
+  let assert Ok(decoded) = alpacki.decode_header_block(truncated, table)
+  assert decoded.headers == []
+  assert decoded.remaining == truncated
+  assert alpacki.dynamic_length(decoded.dynamic_table) == 0
+
+  // Feeding the rest of the value completes the header field.
+  let assert Ok(decoded) =
+    alpacki.decode_header_block(
+      <<decoded.remaining:bits, "m-header":utf8>>,
+      decoded.dynamic_table,
+    )
+  assert decoded.headers == [#(<<"custom-key":utf8>>, <<"custom-header":utf8>>)]
+  assert decoded.remaining == <<>>
+}
+
+pub fn decode_truncated_size_update_test() {
+  let table = alpacki.new_dynamic(4096)
+  // 0x3f starts a size update whose value continues past the prefix, but the
+  // continuation byte is missing.
+  let truncated = <<0x3f>>
+  let assert Ok(decoded) = alpacki.decode_header_block(truncated, table)
+  assert decoded.headers == []
+  assert decoded.remaining == truncated
+  assert alpacki.dynamic_max_size(decoded.dynamic_table) == 4096
 }
 
 // Index 0 is invalid per RFC 7541 Section 6.1
@@ -298,15 +224,12 @@ pub fn decode_indexed_zero_test() {
 // HPACK treats names as opaque octets (RFC 7541 Section 1.3)
 pub fn decode_opaque_header_name_test() {
   let table = alpacki.new_dynamic(4096)
-  let assert Ok(#(headers, _table)) =
+  let assert Ok(decoded) =
     alpacki.decode_header_block(
       <<0x40, 0x03, "FOO":utf8, 0x03, "bar":utf8>>,
       table,
     )
-  assert headers
-    == [
-      alpacki.HeaderField(<<"FOO":utf8>>, <<"bar":utf8>>, alpacki.WithIndexing),
-    ]
+  assert decoded.headers == [#(<<"FOO":utf8>>, <<"bar":utf8>>)]
 }
 
 pub fn decode_missing_expected_size_update_test() {

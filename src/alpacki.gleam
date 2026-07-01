@@ -360,7 +360,10 @@ pub fn decode_string_literal(
 /// |  String Data (Length octets)  |
 /// +-------------------------------+
 /// ```
-pub fn encode_string_literal(data: BitArray, huffman huffman: Bool) -> BitArray {
+pub fn encode_string_literal(
+  data: BitArray,
+  huffman huffman: Bool,
+) -> BitArray {
   let #(data, h) = case huffman {
     True -> #(encode_huffman(data), 0b10000000)
     False -> #(data, 0b00000000)
@@ -983,11 +986,36 @@ pub type HeaderField {
   HeaderField(name: BitArray, value: BitArray, indexing: Indexing)
 }
 
-/// Decodes a complete header block fragment into a list of header fields,
-/// updating the dynamic table as specified by the encoded instructions.
+/// Result of decoding a header block fragment.
+///
+/// `remaining` holds any unconsumed trailing bytes. It is non-empty when the
+/// fragment ends mid field, the header fields decoded so far are returned
+/// along with the updated table, and the caller is expected to prepend more
+/// data to `remaining` and decode again. `remaining` is empty when the whole 
+/// fragment was consumed.
+/// 
+/// `decoded_size` is the sum of RFC 7541 Section 4.1 entry sizes (name +
+/// value + 32) for the headers decoded in this call, useful for enforcing a
+/// maximum header list size across calls.
+pub type DecodedHeaderBlock {
+  DecodedHeaderBlock(
+    headers: List(#(BitArray, BitArray)),
+    decoded_size: Int,
+    dynamic_table: DynamicTable,
+    remaining: BitArray,
+  )
+}
+
+/// Decodes a header block fragment into header fields, updating the dynamic
+/// table as specified by the encoded instructions.
 ///
 /// Any dynamic table size update instructions at the start of the block are
 /// processed automatically before header fields are decoded.
+///
+/// Unlike a single header field or integer, a header block fragment does not
+/// need to be complete. If it ends mid field, decoding stops there and the
+/// unconsumed bytes are returned in `remaining` rather than raising
+/// `Incomplete`.
 ///
 /// See: [RFC 7541 Section 6](https://datatracker.ietf.org/doc/html/rfc7541#section-6)
 ///
@@ -1018,35 +1046,51 @@ pub type HeaderField {
 pub fn decode_header_block(
   data: BitArray,
   dynamic_table: DynamicTable,
-) -> Result(#(List(HeaderField), DynamicTable), DecodeError) {
-  use #(data, table) <- result.try(decode_size_updates(data, dynamic_table))
-  decode_header_fields(data, table, [])
+) -> Result(DecodedHeaderBlock, DecodeError) {
+  use #(data, table, truncated) <- result.try(decode_size_updates(
+    data,
+    dynamic_table,
+  ))
+  case truncated {
+    True ->
+      Ok(DecodedHeaderBlock(
+        headers: [],
+        decoded_size: 0,
+        dynamic_table: table,
+        remaining: data,
+      ))
+    False -> decode_header_fields(data, table, [], 0)
+  }
 }
 
 fn decode_size_updates(
   data: BitArray,
   table: DynamicTable,
-) -> Result(#(BitArray, DynamicTable), DecodeError) {
+) -> Result(#(BitArray, DynamicTable, Bool), DecodeError) {
   case data {
     // 6.3 Dynamic Table Size Update
     //   0   1   2   3   4   5   6   7
     // +---+---+---+---+---+---+---+---+
     // | 0 | 0 | 1 |   Max size (5+)   |
     // +---+---+---+-------------------+
-    <<0:2, 1:1, _:5, _:bits>> -> {
-      use #(new_size, remaining) <- result.try(decode_integer(data, 5))
-      let table =
-        DynamicTable(
-          ..evict_to_size(table, new_size),
-          max_size: new_size,
-          pending_size_update: False,
-        )
-      decode_size_updates(remaining, table)
-    }
+    <<0:2, 1:1, _:5, _:bits>> ->
+      case decode_integer(data, 5) {
+        Error(Incomplete) -> Ok(#(data, table, True))
+        Error(error) -> Error(error)
+        Ok(#(new_size, remaining)) -> {
+          let table =
+            DynamicTable(
+              ..evict_to_size(table, new_size),
+              max_size: new_size,
+              pending_size_update: False,
+            )
+          decode_size_updates(remaining, table)
+        }
+      }
     _ ->
       case table.pending_size_update {
         True -> Error(MissingSizeUpdate)
-        False -> Ok(#(data, table))
+        False -> Ok(#(data, table, False))
       }
   }
 }
@@ -1054,61 +1098,120 @@ fn decode_size_updates(
 fn decode_header_fields(
   data: BitArray,
   table: DynamicTable,
-  acc: List(HeaderField),
-) -> Result(#(List(HeaderField), DynamicTable), DecodeError) {
+  acc: List(#(BitArray, BitArray)),
+  decoded_size: Int,
+) -> Result(DecodedHeaderBlock, DecodeError) {
   case data {
-    <<>> -> Ok(#(list.reverse(acc), table))
+    <<>> ->
+      Ok(DecodedHeaderBlock(
+        headers: list.reverse(acc),
+        decoded_size:,
+        dynamic_table: table,
+        remaining: data,
+      ))
 
     // 6.1 Indexed Header Field Representation
     //   0   1   2   3   4   5   6   7
     // +---+---+---+---+---+---+---+---+
     // | 1 |        Index (7+)         |
     // +---+---------------------------+
-    <<1:1, _:7, _:bits>> -> {
-      use #(index, remaining) <- result.try(decode_integer(data, 7))
-      use #(name, value) <- result.try(
-        lookup(table, index) |> result.replace_error(InvalidTableIndex),
-      )
-      let header = HeaderField(name:, value:, indexing: WithIndexing)
-      decode_header_fields(remaining, table, [header, ..acc])
-    }
+    <<1:1, _:7, _:bits>> ->
+      case decode_integer(data, 7) {
+        Error(Incomplete) -> Ok(stop(acc, decoded_size, table, data))
+        Error(error) -> Error(error)
+        Ok(#(index, remaining)) -> {
+          use #(name, value) <- result.try(
+            lookup(table, index) |> result.replace_error(InvalidTableIndex),
+          )
+          let entry_size = calculate_entry_size(name, value)
+          decode_header_fields(
+            remaining,
+            table,
+            [#(name, value), ..acc],
+            decoded_size + entry_size,
+          )
+        }
+      }
 
     // 6.2.1 Literal Header Field with Incremental Indexing
     //   0   1   2   3   4   5   6   7
     // +---+---+---+---+---+---+---+---+
     // | 0 | 1 |      Index (6+)       |
     // +---+---+-----------------------+
-    <<0:1, 1:1, _:6, _:bits>> -> {
-      use #(name, value, remaining) <- result.try(decode_literal(data, table, 6))
-      let table = add_dynamic(table, name, value)
-      let header = HeaderField(name:, value:, indexing: WithIndexing)
-      decode_header_fields(remaining, table, [header, ..acc])
-    }
+    <<0:1, 1:1, _:6, _:bits>> ->
+      case decode_literal(data, table, 6) {
+        Error(Incomplete) -> Ok(stop(acc, decoded_size, table, data))
+        Error(error) -> Error(error)
+        Ok(#(name, value, remaining)) -> {
+          let table = add_dynamic(table, name, value)
+          let entry_size = calculate_entry_size(name, value)
+          decode_header_fields(
+            remaining,
+            table,
+            [#(name, value), ..acc],
+            decoded_size + entry_size,
+          )
+        }
+      }
 
     // 6.2.3 Literal Header Field Never Indexed
     //   0   1   2   3   4   5   6   7
     // +---+---+---+---+---+---+---+---+
     // | 0 | 0 | 0 | 1 |  Index (4+)   |
     // +---+---+---+---+---------------+
-    <<0:3, 1:1, _:4, _:bits>> -> {
-      use #(name, value, remaining) <- result.try(decode_literal(data, table, 4))
-      let header = HeaderField(name:, value:, indexing: NeverIndexed)
-      decode_header_fields(remaining, table, [header, ..acc])
-    }
+    <<0:3, 1:1, _:4, _:bits>> ->
+      case decode_literal(data, table, 4) {
+        Error(Incomplete) -> Ok(stop(acc, decoded_size, table, data))
+        Error(error) -> Error(error)
+        Ok(#(name, value, remaining)) -> {
+          let entry_size = calculate_entry_size(name, value)
+          decode_header_fields(
+            remaining,
+            table,
+            [#(name, value), ..acc],
+            decoded_size + entry_size,
+          )
+        }
+      }
 
     // 6.2.2 Literal Header Field without Indexing
     //   0   1   2   3   4   5   6   7
     // +---+---+---+---+---+---+---+---+
     // | 0 | 0 | 0 | 0 |  Index (4+)   |
     // +---+---+---+---+---------------+
-    <<0:4, _:4, _:bits>> -> {
-      use #(name, value, remaining) <- result.try(decode_literal(data, table, 4))
-      let header = HeaderField(name:, value:, indexing: WithoutIndexing)
-      decode_header_fields(remaining, table, [header, ..acc])
-    }
+    <<0:4, _:4, _:bits>> ->
+      case decode_literal(data, table, 4) {
+        Error(Incomplete) -> Ok(stop(acc, decoded_size, table, data))
+        Error(error) -> Error(error)
+        Ok(#(name, value, remaining)) -> {
+          let entry_size = calculate_entry_size(name, value)
+          decode_header_fields(
+            remaining,
+            table,
+            [#(name, value), ..acc],
+            decoded_size + entry_size,
+          )
+        }
+      }
 
     _ -> Error(InvalidEncoding)
   }
+}
+
+// Builds the result when decoding stops early because the header block
+// fragment ended mid-field. `data` is the untouched start of that field.
+fn stop(
+  acc: List(#(BitArray, BitArray)),
+  decoded_size: Int,
+  table: DynamicTable,
+  data: BitArray,
+) -> DecodedHeaderBlock {
+  DecodedHeaderBlock(
+    headers: list.reverse(acc),
+    decoded_size:,
+    dynamic_table: table,
+    remaining: data,
+  )
 }
 
 fn decode_literal(
