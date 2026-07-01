@@ -1,11 +1,13 @@
 name = "alpacki"
-version = "2.0.0"
+version = "3.0.0"
 
 description = "🦙 HPACK protocol (RFC 7541) for Gleam"
 target = "erlang"
 licenses = ["Apache-2.0"]
 repository = { type = "github", user = "vshakitskiy", repo = "alpacki" }
-links = [{ title = "RFC 7541", href = "http://www.rfc-editor.org/rfc/rfc7541.txt" }]
+links = [
+    { title = "RFC 7541", href = "http://www.rfc-editor.org/rfc/rfc7541.txt" },
+]
 
 [dependencies]
 gleam_stdlib = ">= 0.44.0 and < 2.0.0"

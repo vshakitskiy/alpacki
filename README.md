@@ -7,7 +7,7 @@ alpacki is an HPACK ([RFC 7541](https://datatracker.ietf.org/doc/html/rfc7541))
 implementation for Gleam. It handles header compression for HTTP/2 connections.
 
 ```sh
-gleam add alpacki@2
+gleam add alpacki@3
 ```
 
 # Encoding and decoding
