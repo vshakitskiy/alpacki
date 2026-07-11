@@ -1,5 +1,5 @@
 name = "alpacki"
-version = "3.0.0"
+version = "3.0.1"
 
 description = "🦙 HPACK protocol (RFC 7541) for Gleam"
 target = "erlang"

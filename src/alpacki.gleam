@@ -622,7 +622,7 @@ pub fn match_static(name: BitArray, value: BitArray) -> TableMatch {
 /// Dynamic table for HPACK compression. Stores recently used header fields
 /// with indices starting at 62. The encoder and decoder each maintain their
 /// own table.
-///
+/// 
 /// See: [RFC 7541 Section 2.3.2](https://datatracker.ietf.org/doc/html/rfc7541#section-2.3.2)
 pub opaque type DynamicTable {
   DynamicTable(
@@ -805,50 +805,7 @@ pub fn clear_dynamic(table: DynamicTable) -> DynamicTable {
 fn evict_until_fits(table: DynamicTable, needed_space: Int) -> DynamicTable {
   case table.size + needed_space <= table.max_size {
     True -> table
-    False -> {
-      let #(reversed_entries, new_size, new_length) =
-        do_evict_until_fits(
-          list.reverse(table.entries),
-          table.size,
-          table.length,
-          needed_space,
-          table.max_size,
-        )
-
-      DynamicTable(
-        ..table,
-        entries: list.reverse(reversed_entries),
-        size: new_size,
-        length: new_length,
-      )
-    }
-  }
-}
-
-fn do_evict_until_fits(
-  reversed_entries: List(#(BitArray, BitArray)),
-  size: Int,
-  length: Int,
-  needed_space: Int,
-  max_size: Int,
-) -> #(List(#(BitArray, BitArray)), Int, Int) {
-  case size + needed_space <= max_size {
-    True -> #(reversed_entries, size, length)
-    False ->
-      case reversed_entries {
-        [] -> #([], size, length)
-        [#(name, value), ..remaining] -> {
-          let freed_size = calculate_entry_size(name, value)
-
-          do_evict_until_fits(
-            remaining,
-            size - freed_size,
-            length - 1,
-            needed_space,
-            max_size,
-          )
-        }
-      }
+    False -> rebuild_within(table, table.max_size - needed_space)
   }
 }
 
@@ -856,46 +813,47 @@ fn do_evict_until_fits(
 fn evict_to_size(table: DynamicTable, target_size: Int) -> DynamicTable {
   case table.size <= target_size {
     True -> table
-    False -> {
-      let #(reversed_entries, new_size, new_length) =
-        do_evict_to_size(
-          list.reverse(table.entries),
-          table.size,
-          table.length,
-          target_size,
-        )
-
-      DynamicTable(
-        ..table,
-        entries: list.reverse(reversed_entries),
-        size: new_size,
-        length: new_length,
-      )
-    }
+    False -> rebuild_within(table, target_size)
   }
 }
 
-fn do_evict_to_size(
-  reversed_entries: List(#(BitArray, BitArray)),
-  size: Int,
-  length: Int,
-  target_size: Int,
+// `entries` is newest first, so lets keep the newest first prefix that fits 
+// the `budget` and drop the remaining.
+fn rebuild_within(table: DynamicTable, budget: Int) -> DynamicTable {
+  let #(kept, new_size, new_length) =
+    keep_within(table.entries, budget, [], 0, 0)
+
+  DynamicTable(
+    ..table,
+    entries: list.reverse(kept),
+    size: new_size,
+    length: new_length,
+  )
+}
+
+fn keep_within(
+  entries: List(#(BitArray, BitArray)),
+  budget: Int,
+  kept: List(#(BitArray, BitArray)),
+  kept_size: Int,
+  kept_length: Int,
 ) -> #(List(#(BitArray, BitArray)), Int, Int) {
-  case size <= target_size {
-    True -> #(reversed_entries, size, length)
-    False ->
-      case reversed_entries {
-        [] -> #([], size, length)
-        [#(name, value), ..remaining] -> {
-          let freed_size = calculate_entry_size(name, value)
-          do_evict_to_size(
+  case entries {
+    [] -> #(kept, kept_size, kept_length)
+    [#(name, value) as entry, ..remaining] -> {
+      let entry_size = calculate_entry_size(name, value)
+      case kept_size + entry_size <= budget {
+        True ->
+          keep_within(
             remaining,
-            size - freed_size,
-            length - 1,
-            target_size,
+            budget,
+            [entry, ..kept],
+            kept_size + entry_size,
+            kept_length + 1,
           )
-        }
+        False -> #(kept, kept_size, kept_length)
       }
+    }
   }
 }
 
@@ -1272,24 +1230,31 @@ pub fn encode_header_block(
   dynamic_table: DynamicTable,
   huffman huffman: Bool,
 ) -> #(BitArray, DynamicTable) {
-  let #(table, acc) = emit_pending_resizes(dynamic_table)
-  encode_header_fields(headers, table, huffman, acc)
+  let #(table, resize_pieces) = emit_pending_resizes(dynamic_table)
+  let #(pieces, table) =
+    encode_header_fields(headers, table, huffman, list.reverse(resize_pieces))
+  #(bit_array.concat(list.reverse(pieces)), table)
 }
 
-fn emit_pending_resizes(table: DynamicTable) -> #(DynamicTable, BitArray) {
+// The private helpers below build a flat `List(BitArray)` by consing
+// instead of concatenating each piece with `<<a:bits, b:bits>>`.
+// `encode_header_block` is the only place that flattens, via
+// `bit_array.concat`, once, for the whole block.
+fn emit_pending_resizes(
+  table: DynamicTable,
+) -> #(DynamicTable, List(BitArray)) {
   case table.pending_resize {
-    None -> #(table, <<>>)
+    None -> #(table, [])
     Some(min_size) -> {
       let table = DynamicTable(..table, pending_resize: None)
       case min_size < table.max_size {
         // Size went down then back up; emit minimum then final.
-        True -> {
-          let first = encode_table_size_update(min_size)
-          let second = encode_table_size_update(table.max_size)
-          #(table, <<first:bits, second:bits>>)
-        }
+        True -> #(table, [
+          encode_table_size_update(min_size),
+          encode_table_size_update(table.max_size),
+        ])
         // Size only went down or stayed unchanged; emit final.
-        False -> #(table, encode_table_size_update(min_size))
+        False -> #(table, [encode_table_size_update(min_size)])
       }
     }
   }
@@ -1299,13 +1264,14 @@ fn encode_header_fields(
   headers: List(HeaderField),
   table: DynamicTable,
   huffman: Bool,
-  acc: BitArray,
-) -> #(BitArray, DynamicTable) {
+  acc: List(BitArray),
+) -> #(List(BitArray), DynamicTable) {
   case headers {
     [] -> #(acc, table)
     [header, ..remaining] -> {
-      let #(encoded, table) = encode_header_field(header, table, huffman)
-      encode_header_fields(remaining, table, huffman, <<acc:bits, encoded:bits>>)
+      let #(pieces, table) = encode_header_field(header, table, huffman)
+      let acc = list.fold(pieces, acc, fn(acc, piece) { [piece, ..acc] })
+      encode_header_fields(remaining, table, huffman, acc)
     }
   }
 }
@@ -1314,9 +1280,9 @@ fn encode_header_field(
   header: HeaderField,
   table: DynamicTable,
   huffman: Bool,
-) -> #(BitArray, DynamicTable) {
+) -> #(List(BitArray), DynamicTable) {
   case match(table, header.name, header.value), header.indexing {
-    FullMatch(index), _ -> #(encode_indexed(index), table)
+    FullMatch(index), _ -> #([encode_indexed(index)], table)
 
     // Name match + store; literal with incremental indexing.
     NameMatch(index), WithIndexing -> {
@@ -1381,10 +1347,10 @@ fn encode_literal(
   prefix: Int,
   type_bits: Int,
   huffman: Bool,
-) -> BitArray {
+) -> List(BitArray) {
   let index = encode_prefixed_integer(index, prefix, type_bits)
   let value = encode_string_literal(value, huffman:)
-  <<index:bits, value:bits>>
+  [index, value]
 }
 
 // 6.2.x Literal Header Field with new name.
@@ -1394,9 +1360,9 @@ fn encode_literal_new_name(
   prefix: Int,
   type_bits: Int,
   huffman: Bool,
-) -> BitArray {
+) -> List(BitArray) {
   let index = encode_prefixed_integer(0, prefix, type_bits)
   let name = encode_string_literal(name, huffman:)
   let value = encode_string_literal(value, huffman:)
-  <<index:bits, name:bits, value:bits>>
+  [index, name, value]
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.0.1 - 11.07.2026
+
+- Optimize reallocations
+
 ## v3.0.0 - 02.07.2026
 
 - Introduce `DecodedHeaderBlock` as a success return value for decoding header 
